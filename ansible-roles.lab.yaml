@@ -1,0 +1,310 @@
+# Ansible roles, handlers and vault
+# Ansible runs against this one VM, so a student can practise it with nothing else to set up.
+# It is installed by the setup below, from Ubuntu's archive, the first time the VM starts.
+cpus: 1
+memory: 1024    # MB
+disk: 10        # GB
+
+# Nothing opens in the browser: the lab is the terminal.
+open: []
+
+# Run once, as root. Its output is kept in /var/log/mitsurutech-setup.log on the VM.
+setup: |
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq --no-install-recommends ansible-core python3-yaml
+  home=/home/student
+  [ -d $home ] || home=/root
+  proj=$home/roles-lab
+  mkdir -p $proj/roles
+  cat > $proj/inventory.ini <<'ANSIBLEROLES_INVENTORY_END'
+  # Two names for this one machine, reached directly and not over ssh.
+  [web]
+  web1 ansible_connection=local
+
+  [spare]
+  spare1 ansible_connection=local
+  ANSIBLEROLES_INVENTORY_END
+  cat > $proj/ansible.cfg <<'ANSIBLEROLES_CONFIG_END'
+  [defaults]
+  inventory = inventory.ini
+  roles_path = roles
+  interpreter_python = auto_silent
+  ANSIBLEROLES_CONFIG_END
+  # The same setting for Ansible run from any other folder, so it never warns about the interpreter.
+  cat > $home/.ansible.cfg <<'ANSIBLEROLES_HOMECONFIG_END'
+  [defaults]
+  interpreter_python = auto_silent
+  ANSIBLEROLES_HOMECONFIG_END
+  cat > $proj/site.yml <<'ANSIBLEROLES_SITE_END'
+  ---
+  # Ansible Roles. Run it with:  ansible-playbook site.yml --vault-password-file vault-password.txt
+  # The two variables below are set on the play. Keep them: the lab is about which one wins.
+  - name: Set the app up on the web hosts
+    hosts: web
+    become: true
+    vars:
+      app_env: staging
+      app_dir: /tmp/rolelab-wrong
+    roles:
+      - appconf
+  ANSIBLEROLES_SITE_END
+  echo lab-password-not-a-secret > $proj/vault-password.txt
+  cat > $home/README.md <<'ANSIBLEROLES_README_END'
+  # Lab: Ansible roles, handlers and vault
+
+  You wrote a playbook in the Ansible Basics lab. A playbook that grows becomes one long file
+  nobody wants to reuse. A **role** is a playbook cut into a fixed set of folders, so it can be
+  shared and tested alone. In this lab you build one role, learn which variable wins when
+  several have the same name, make a handler run once, and keep a secret in Ansible Vault. The
+  machine is this VM, over a local connection.
+
+  ## The project, in ~/roles-lab
+
+      ansible.cfg          points at inventory.ini and the roles folder
+      inventory.ini        two hosts, web1 in group web and spare1 in group spare, both this machine
+      site.yml             the playbook: one play on the group web that uses the role appconf
+      vault-password.txt   the vault password for this lab: fake, and not a secret
+      roles/               where the role goes
+
+  ## What to do
+
+  1. Go to the project and run the playbook: cd ~/roles-lab, then ansible-playbook site.yml.
+     It stops, because the role appconf does not exist. Read site.yml: the play, the role it
+     names, and the two variables set on the play.
+  2. Make the role with the tool Ansible ships for it: ansible-galaxy role init --init-path
+     roles appconf. Look at the folders it made. Then open roles/appconf/meta/main.yml and
+     replace the author and the description with your own words.
+  3. Variables, in defaults/main.yml: app_name is Riverside College, app_port is 8080,
+     app_env is dev, app_features is a list of two words, metrics and logging, and app_user
+     is appsvc. In vars/main.yml: app_dir is /etc/rolelab. Note that site.yml also sets
+     app_env and app_dir. Which one wins, and why? Order of precedence is the whole point:
+     run it and find out. The role must always write under /etc/rolelab, and its environment
+     is whatever site.yml says unless -e on the command line says otherwise.
+  4. The tasks, in tasks/main.yml, in this order. Tag each one config or user, as said:
+     - the folder {{ app_dir }}/features.d, mode 0755 (config)
+     - {{ app_dir }}/app.conf, made from templates/app.conf.j2, owner and group root, mode 0644
+       (config). Its lines: name = the app_name, port = the app_port, environment = the
+       app_env, a line debug = true only when the environment is dev, and one line
+       feature.NAME = on for each feature in the list
+     - one file {{ app_dir }}/features.d/NAME.on for each feature, holding the word on, made
+       with a loop (config)
+     - {{ app_dir }}/api.token, owner and group root, mode 0600, holding the value of
+       app_api_token (config), see step 6
+     - the system user app_user, no home folder, shell /usr/sbin/nologin (user)
+     - {{ app_dir }}/first-run.txt holding the line created NAME, with the user's name, written
+       only when the task before really created the user (user). Keep that task's result and
+       test it
+     - {{ app_dir }}/applied.txt holding the line applied NAME, with the app_name (config)
+  5. One handler, which writes {{ app_dir }}/reloaded.txt holding the line reloaded for NAME,
+     with the app_name. The template, the features and the token task all tell it to run when
+     they change something, yet it must run once in a run, not three times. And applied.txt
+     must be written after the handler has run, not at the very end of the play: a role can
+     run its handlers in the middle of its tasks, so look in ansible-doc for how.
+  6. Vault. Make roles/appconf/vars/secrets.yml with ansible-vault, encrypted with the password
+     in vault-password.txt, holding the line app_api_token: demo-token-4711 (demo data, never a
+     real secret). ansible-vault create opens an editor: type the line and save. Load the file
+     in the role with a task that always runs, whichever tags are chosen. The token must be
+     written in plain text nowhere else in the project.
+  7. Run the playbook. Then run it again: the recap must say changed=0 and no handler runs.
+     Then try the modes: a dry run, --check --diff; the tags, --tags user and --tags config;
+     and --limit spare1. Remember to pass --vault-password-file vault-password.txt.
+
+  ## Rules the check holds you to
+
+  - Use Ansible's own modules. A task that only runs shell, command, raw or script is not what
+    this lab is about, and neither is a lookup that runs a program. The check refuses them.
+  - The work is in the role, in tasks, defaults, vars, templates and handlers. site.yml keeps
+    its play, its hosts, its two variables and the role. The check runs your site.yml.
+  - Do the work by running the playbook, not by hand. The check removes /etc/rolelab and runs
+    your playbook with values you have not seen.
+
+  ## Tools
+
+  - ansible-playbook site.yml --vault-password-file vault-password.txt   run it
+  - ansible-playbook site.yml --check --diff    a dry run: what would change, and how
+  - ansible-playbook site.yml --tags user       only the tasks with that tag
+  - ansible-playbook site.yml --limit spare1    only that host, if the play uses it
+  - ansible-playbook site.yml -e app_port=9000  a variable from the command line
+  - ansible-galaxy role init --help             what the scaffold tool can do
+  - ansible-vault view FILE --vault-password-file vault-password.txt
+  - ansible-doc -l                              every module there is
+  - ansible-doc ansible.builtin.meta            the manual page of one module
+
+  This VM reaches Ubuntu's package archive, PyPI, npm and GitHub, and nothing else.
+  ANSIBLEROLES_README_END
+  chown -R student:student $proj $home/README.md $home/.ansible.cfg 2>/dev/null
+  echo "Read README.md in your home folder first." > /etc/motd
+
+# Marks a handed-in VM, KAN-29: run as root on a copy of the saved disk after a fresh boot, so
+# it sees only what was saved. Its exit status is the result: 0 passes.
+check: |
+  fail() {
+    echo "NOT PASSED: $*"
+    exit 1
+  }
+  proj=/home/student/roles-lab
+  role=$proj/roles/appconf
+  pw=$proj/vault-password.txt
+  [ -d $proj ] || fail "there is no $proj"
+  command -v ansible-playbook >/dev/null 2>&1 || fail "Ansible is not installed on this machine"
+  [ -s $pw ] || fail "vault-password.txt is missing or empty"
+  # The role is a real role, made of Ansible's own modules, with the work inside it.
+  python3 - $proj <<'ANSIBLEROLES_PARSE_END' || exit 1
+  import os, re, sys, yaml
+  proj = sys.argv[1]
+  role = proj + '/roles/appconf'
+  def die(why):
+      print('NOT PASSED: ' + why)
+      sys.exit(1)
+  yaml.SafeLoader.add_constructor('!vault', lambda loader, node: 'vault')
+  def load(path):
+      try:
+          return yaml.safe_load(open(path))
+      except Exception as why:
+          die('%s is not valid YAML: %s' % (path.replace(proj + '/', ''), str(why).split('\n')[0]))
+  if not os.path.isdir(role):
+      die('there is no role at roles/appconf: make it with ansible-galaxy role init')
+  for part in ('tasks', 'defaults', 'vars', 'templates', 'files', 'handlers', 'meta'):
+      if not os.path.isdir(role + '/' + part):
+          die('the role has no %s folder' % part)
+  for part in ('tasks', 'defaults', 'handlers', 'meta'):
+      if not os.path.isfile('%s/%s/main.yml' % (role, part)):
+          die('the role has no %s/main.yml' % part)
+  info = (load(role + '/meta/main.yml') or {}).get('galaxy_info') or {}
+  for key, stock in (('author', 'your name'), ('description', 'your role description')):
+      if not info.get(key) or str(info[key]).strip() == stock:
+          die('meta/main.yml still has the placeholder %s: say who made the role and what it does' % key)
+  defaults = load(role + '/defaults/main.yml')
+  if not isinstance(defaults, dict) or not {'app_name', 'app_port', 'app_env', 'app_features', 'app_user'} <= set(defaults):
+      die('defaults/main.yml must define app_name, app_port, app_env, app_features and app_user')
+  SKIP = {'name', 'when', 'loop', 'register', 'notify', 'tags', 'become', 'vars', 'args', 'no_log', 'changed_when',
+          'failed_when', 'listen', 'block', 'rescue', 'always', 'loop_control', 'delegate_to', 'ignore_errors',
+          'check_mode', 'diff', 'environment', 'until', 'retries', 'delay', 'run_once', 'become_user'}
+  BAD = {'shell', 'command', 'raw', 'script', 'expect', 'action', 'local_action', 'include', 'import_playbook'}
+  def files(folder):
+      return [os.path.join(folder, f) for f in sorted(os.listdir(folder)) if f.endswith(('.yml', '.yaml'))]
+  def walk(items, found):
+      for t in items or []:
+          if not isinstance(t, dict):
+              continue
+          found.append(t)
+          for key in ('block', 'rescue', 'always'):
+              if isinstance(t.get(key), list):
+                  walk(t[key], found)
+      return found
+  tasks, handlers = [], []
+  for path in files(role + '/tasks'):
+      walk(load(path), tasks)
+  for path in files(role + '/handlers'):
+      walk(load(path), handlers)
+  texts = [open(p).read() for p in files(role + '/tasks') + files(role + '/handlers') + [proj + '/site.yml']]
+  if any(re.search(r"lookup\(\s*['\"](ansible\.builtin\.)?pipe", text) for text in texts):
+      die('a lookup of pipe runs a program: use a module')
+  def modules(t):
+      return [str(k).split('.')[-1] for k in t if k not in SKIP and not str(k).startswith('with_')]
+  used = set(m for t in tasks + handlers for m in modules(t))
+  for name in sorted(used & BAD):
+      die('the role uses %s: the jobs are to be done with Ansible modules' % name)
+  real = [t for t in tasks if modules(t) and 'block' not in t]
+  if len(real) < 6:
+      die('the role has %d tasks in tasks/ and the work is to be done there: at least six' % len(real))
+  if not handlers:
+      die('the role has no handler: handlers/main.yml is empty')
+  if sum(1 for t in tasks if t.get('notify')) < 2:
+      die('fewer than two tasks notify a handler')
+  if 'template' not in used:
+      die('the role has no task that makes a file from a template')
+  if not any(t.get('loop') or any(str(k).startswith('with_') for k in t) for t in tasks):
+      die('the role has no loop')
+  if not any(t.get('when') for t in tasks) or not any(t.get('register') for t in tasks):
+      die('the role has no task with register and a later task with when')
+  if not any(t.get('tags') for t in tasks):
+      die('the role has no tags')
+  if not any(str(k).endswith('meta') and t[k] == 'flush_handlers' for t in tasks for k in t):
+      die('the role never runs its handlers part way: look at the meta module')
+  tpl = ''.join(open(os.path.join(role, 'templates', f)).read() for f in os.listdir(role + '/templates'))
+  if not re.search(r'\{%-?\s*for ', tpl) or not re.search(r'\{%-?\s*if ', tpl):
+      die('the template needs a for loop and an if, in Jinja2')
+  plays = load(proj + '/site.yml')
+  ok = isinstance(plays, list) and plays and isinstance(plays[0], dict)
+  play = plays[0] if ok else {}
+  names = [r.get('role', r.get('name')) if isinstance(r, dict) else r for r in play.get('roles') or []]
+  if 'appconf' not in names:
+      die('site.yml does not use the role appconf')
+  if play.get('hosts') != 'web' or (play.get('vars') or {}).get('app_env') != 'staging' or (play.get('vars') or {}).get('app_dir') != '/tmp/rolelab-wrong':
+      die('site.yml has lost its hosts: web or its two variables, app_env and app_dir: put them back')
+  ANSIBLEROLES_PARSE_END
+  # The vault: a whole encrypted file that opens with the lab's password, its token nowhere in plain.
+  enc=$(grep -l '^.ANSIBLE_VAULT;' $role/vars/* 2>/dev/null | head -1)
+  [ -n "$enc" ] || fail "no file in roles/appconf/vars starts with the vault header: encrypt the secrets with ansible-vault"
+  plain=$(ansible-vault view --vault-password-file $pw "$enc" 2>&1) || fail "$enc does not open with vault-password.txt"
+  token=$(echo "$plain" | sed -n 's/^app_api_token: *//p' | tr -d "\"'" | head -1)
+  [ -n "$token" ] || fail "the vaulted file does not define app_api_token"
+  grep -rqF -- "$token" $proj/roles $proj/site.yml && fail "the token is written in plain text in the project, outside the vault"
+  # Seven runs of the student's own site.yml, with values nobody has seen.
+  export ANSIBLE_NOCOLOR=1 ANSIBLE_FORCE_COLOR=0 ANSIBLE_CONFIG=/tmp/roles-check.cfg
+  printf '[defaults]\ninterpreter_python = auto_silent\nroles_path = %s/roles\n' $proj > $ANSIBLE_CONFIG
+  printf '[web]\nweb1 ansible_connection=local\n\n[spare]\nspare1 ansible_connection=local\n' > /tmp/roles-check-inventory
+  N="Check$(date +%s)"
+  U1="u1$(date +%s)"
+  D=/etc/rolelab
+  conf=$D/app.conf
+  rm -rf $D /tmp/rolelab-wrong
+  cd $proj || fail "there is no $proj"
+  go() { timeout 300 ansible-playbook -i /tmp/roles-check-inventory $proj/site.yml --vault-password-file $pw "$@" 2>&1; }
+  why() { echo "$1" | grep -m1 -E 'fatal:|ERROR|FAILED' | cut -c1-200; }
+  handled() { echo "$1" | grep -c '^RUNNING HANDLER'; }
+  has() { grep -qx -- "$2" $1; }
+  # Run A, a clean machine.
+  outA=$(go -e app_name=$N -e app_user=$U1) || fail "the playbook failed: $(why "$outA")"
+  [ ! -e /tmp/rolelab-wrong ] || fail "app_dir came from the play: a role's vars beat a play's variables and its defaults lose to them, so app_dir belongs in vars/main.yml"
+  [ -f $conf ] || fail "there is no $conf"
+  [ "$(handled "$outA")" = 1 ] || fail "the handler ran $(handled "$outA") times in one run: three tasks notify it, so it should run once"
+  echo "$outA" | sed -n '/^RUNNING HANDLER/,$p' | grep -q '^TASK \[' || fail "no task ran after the handler: run the handlers part way, before the last task"
+  [ "$(stat -c '%U:%G %a' $conf)" = "root:root 644" ] || fail "$conf should be root:root mode 0644, not $(stat -c '%U:%G %a' $conf)"
+  has $conf "name = $N" || fail "$conf does not say name = $N: it is not made from app_name"
+  has $conf "port = 8080" || fail "$conf does not say port = 8080: the default of app_port"
+  has $conf "environment = staging" || fail "$conf does not say environment = staging: a play's variable beats a role default"
+  grep -q '^debug' $conf && fail "$conf has a debug line outside the dev environment"
+  for f in metrics logging; do
+    has $conf "feature.$f = on" || fail "$conf has no line feature.$f = on"
+    [ -f $D/features.d/$f.on ] || fail "there is no $D/features.d/$f.on"
+  done
+  getent passwd $U1 >/dev/null || fail "the user $U1 was not made"
+  has $D/first-run.txt "created $U1" || fail "$D/first-run.txt does not say created $U1"
+  [ "$(stat -c '%U %a' $D/api.token)" = "root 600" ] || fail "$D/api.token should be owned by root with mode 0600"
+  [ "$(tr -d '\n' < $D/api.token)" = "$token" ] || fail "$D/api.token does not hold the token from the vault"
+  has $D/reloaded.txt "reloaded for $N" || fail "$D/reloaded.txt does not say reloaded for $N"
+  has $D/applied.txt "applied $N" || fail "$D/applied.txt does not say applied $N"
+  # Run B, again: idempotent, nothing handled, a when that skipped.
+  outB=$(go -e app_name=$N -e app_user=$U1) || fail "the playbook failed on its second run: $(why "$outB")"
+  echo "$outB" | grep -E '^web1 +: ' | grep -Eq 'changed=0 +unreachable=0 +failed=0' || fail "a second run still changed things, so it is not idempotent: $(echo "$outB" | awk '/^TASK \[/ {t=$0} /^changed:/ {printf "%s; ", t}' | cut -c1-200)"
+  [ "$(handled "$outB")" = 0 ] || fail "a handler ran on the second run, when nothing changed"
+  echo "$outB" | grep -q '^skipping:' || fail "no task was skipped by a when on the second run"
+  # Run C, a dry run: the diff shows the change and nothing is written.
+  outC=$(go --check --diff -e app_name=Dry$N -e app_user=$U1) || fail "--check --diff failed: $(why "$outC")"
+  echo "$outC" | grep -q "^+name = Dry$N" || fail "--check --diff does not show the template changing the name line"
+  has $conf "name = $N" || fail "a dry run changed $conf"
+  # Run D, other values: the loop and the if in the template.
+  outD=$(go -e app_name=$N -e app_user=$U1 -e app_port=9091 -e app_env=dev -e '{"app_features":["alpha"]}') || fail "the playbook failed with other values: $(why "$outD")"
+  [ "$(handled "$outD")" = 1 ] || fail "the handler ran $(handled "$outD") times when the configuration changed: it should run once"
+  has $conf "port = 9091" || fail "-e app_port=9091 did not reach $conf: extra vars beat everything"
+  has $conf "environment = dev" || fail "-e app_env=dev did not reach $conf"
+  has $conf "debug = true" || fail "$conf has no debug = true line in the dev environment"
+  has $conf "feature.alpha = on" || fail "$conf has no line feature.alpha = on"
+  grep -q 'feature.metrics' $conf && fail "$conf still lists a feature that is not in app_features"
+  [ -f $D/features.d/alpha.on ] || fail "there is no $D/features.d/alpha.on"
+  # Runs E, tags: each group alone.
+  U2="u2$(date +%s)"
+  U3="u3$(date +%s)"
+  outE=$(go --tags user -e app_name=Tag$N -e app_user=$U2) || fail "--tags user failed: $(why "$outE")"
+  getent passwd $U2 >/dev/null || fail "--tags user did not make the user"
+  has $conf "name = $N" || fail "--tags user changed $conf: the config tasks have no tag user"
+  outE=$(go --tags config -e app_name=Tag3$N -e app_user=$U3) || fail "--tags config failed: $(why "$outE")"
+  has $conf "name = Tag3$N" || fail "--tags config did not write $conf"
+  getent passwd $U3 >/dev/null && fail "--tags config made a user: the user task has no tag user"
+  # Run F, a host the play does not use.
+  outF=$(go --limit spare1 -e app_name=Limit$N -e app_user=$U1) || fail "--limit spare1 failed: $(why "$outF")"
+  has $conf "name = Tag3$N" || fail "--limit spare1 changed $conf, which only web1 should be"
+  echo "PASSED: a real role, variables in the right order, one handler run, tags and limit, and a vault that opens, with a second run that changes nothing"
